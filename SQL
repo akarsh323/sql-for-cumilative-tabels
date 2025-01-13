@@ -1,0 +1,81 @@
+INSERT INTO users_cumulated
+WITH yesterday AS (
+    SELECT *
+    FROM users_cumulated
+    WHERE date = DATE('2022-12-31') -- Select yesterday's data
+),
+
+today AS (
+    SELECT
+        user_id,
+        DATE(event_time) AS date_active -- Extract the date part of event_time
+    FROM events
+    WHERE DATE(event_time) = DATE('2023-01-01') -- Filter for today's events
+      AND user_id IS NOT NULL -- Exclude null user IDs
+    GROUP BY user_id, DATE(event_time) -- Ensure unique rows
+)
+
+SELECT
+    COALESCE(t.user_id, y.user_id) AS user_id, -- Merge user IDs from both datasets
+    CASE
+        WHEN y.dates_active IS NULL THEN ARRAY[t.date_active] -- New user; initialize array
+        WHEN t.date_active IS NULL THEN y.dates_active -- User inactive today; keep yesterday's dates
+        ELSE ARRAY[t.date_active] || y.dates_active -- User active today; append to existing dates
+    END AS dates_active,
+    COALESCE(t.date_active, y.date + INTERVAL '1 day') AS date -- Determine the date to insert
+FROM today t
+FULL OUTER JOIN yesterday y
+ON t.user_id = y.user_id;
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+WITH
+daily_aggregate AS (
+    SELECT
+        user_id,
+        COUNT(1) AS num_site_hits
+    FROM events
+    WHERE DATE(event_time) = DATE('2023-01-01')
+      AND user_id IS NOT NULL
+    GROUP BY user_id
+),
+
+yesterday_array AS (
+    SELECT *
+    FROM array_metrics
+    WHERE month_start = DATE('2023-01-01')
+)
+
+SELECT
+    COALESCE(da.user_id, ya.user_id) AS user_id,
+    COALESCE(ya.month_start, DATE_TRUNC('month', DATE('2023-01-01'))) AS month_start,
+    'site_hits' AS metric_name,
+    CASE 
+        WHEN ya.metric_array IS NOT NULL THEN
+            ya.metric_array || ARRAY[COALESCE(da.num_site_hits, 0)]
+        ELSE 
+            ARRAY[COALESCE(da.num_site_hits, 0)]
+    END AS metric_array
+FROM
+    daily_aggregate da
+FULL OUTER JOIN yesterday_array ya
+    ON da.user_id = ya.user_id;
+
+-- Insert or Update the results in `array_metrics`
+INSERT INTO array_metrics (user_id, month_start, metric_name, metric_array)
+SELECT
+    COALESCE(da.user_id, ya.user_id) AS user_id,
+    COALESCE(ya.month_start, DATE_TRUNC('month', DATE('2023-01-01'))) AS month_start,
+    'site_hits' AS metric_name,
+    CASE 
+        WHEN ya.metric_array IS NOT NULL THEN
+            ya.metric_array || ARRAY[COALESCE(da.num_site_hits, 0)]
+        ELSE 
+            ARRAY[COALESCE(da.num_site_hits, 0)]
+    END AS metric_array
+FROM
+    daily_aggregate da
+FULL OUTER JOIN yesterday_array ya
+    ON da.user_id = ya.user_id
+ON CONFLICT (user_id, month_start, metric_name)
+DO UPDATE SET
+    metric_array = EXCLUDED.metric_array;
+-------------------------------------------------------------------------------------------------------------------------------------------------------
